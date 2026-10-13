@@ -1,0 +1,11 @@
+# dsh-pet-window —— DSH bundle patch
+#
+# 只做一件事：把这个插件挂进组合树。
+# 挂上之后 apply() 会在 DSH 启动时拉起原生窗口进程（helper/pet-window.ps1）。
+#
+# 没有可调配置：窗口的位置记忆、轮询间隔等都在 helper 脚本里，
+# 需要改行为就改 helper/pet-window.ps1 的参数默认值。
+
+- insert:
+    - id: dsh-pet-window
+      name: dsh-pet-window

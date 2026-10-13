@@ -1,0 +1,10 @@
+# 本仓库不含美术素材（原因见 NOTICE-assets.md）
+assets/
+
+# 本机安装 / 备份产物，不属于插件本身
+plugin-backup/
+install-backup/
+node_modules/
+*.zip
+*.log
+*.lnk
