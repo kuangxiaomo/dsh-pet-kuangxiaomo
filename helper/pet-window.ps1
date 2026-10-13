@@ -326,27 +326,47 @@ foreach ($el in @($dragBar, $bubble, $petArea)) {
 Write-Log ("拖动手柄已挂上：" + (@($dragBar, $bubble, $petArea) | Where-Object { $null -ne $_ }).Count + " 处")
 
 # ---------- 三只感官的开关（2026-10-13 用户要求"随时开关耳朵/守夜人/屏幕眼"） ----------
-# 逻辑**只有一份**，放在工作区的 ..\..\senses.ps1 里（命令行和这个窗口共用）：
-#   dot-source 进来就能直接调 Get-SenseStatus / Invoke-SenseToggle。
-# 按一下按钮 = 立刻起/停对应的 pythonw 进程 + 把状态写进 ~/.dsh/senses.json。
-# ⚠ 桌面小窗进程自己的命令行里不会有 ear.py / screen_eye.py 这些关键字，
-#   而且 senses.ps1 里杀进程时永远排除当前 $PID（R8 那条血的教训）。
+# 🔴 2026-10-13 血的教训：**绝对不要 dot-source senses.ps1**
+#   它里面写的是 `$StatePath`，本脚本用的是 `$statePath` —— PowerShell 变量**不区分大小写**，
+#   dot-source 之后本脚本的 `$statePath` 被顶成了 `~/.dsh/senses.json`，
+#   于是"窗口位置"被写进了感官开关的状态文件（e2e 的「位置记忆文件已写出」就是这么挂的）。
+#   现在改成**起子进程**调用 senses.ps1：变量互不污染，这类撞车从根上消失；代价是每次点击多约 1 秒。
 $script:senseButtons = [ordered]@{ ear = $btnEar; watchman = $btnWatch; eye = $btnEye }
 $script:senseShort   = @{ ear = '耳朵'; watchman = '守夜'; eye = '屏幕' }
 $script:senseFull    = @{ ear = '耳朵'; watchman = '守夜人'; eye = '屏幕眼' }
-$script:sensesOk     = $false
 $script:sensePath    = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'senses.ps1'
+$script:sensesOk     = (Test-Path -LiteralPath $script:sensePath)
+if ($script:sensesOk) { Write-Log "感官开关已接入（子进程模式）：$script:sensePath" }
+else { Write-Log "找不到 senses.ps1（$script:sensePath）：开关按钮不可用" }
 
-try {
-  if (Test-Path -LiteralPath $script:sensePath) {
-    . $script:sensePath
-    $script:sensesOk = $true
-    Write-Log "感官开关已接入：$script:sensePath"
-  } else {
-    Write-Log "找不到 senses.ps1（$script:sensePath）：三个开关按钮会显示成不可用"
+function Invoke-SensesCli {
+  param([string[]]$CliArgs)
+  try {
+    # ⚠ 这里必须用 splat（`@CliArgs`）把数组摊成独立参数；写成 `-CliArgs $CliArgs`
+    #   会把 "-CliArgs" 当成 senses.ps1 的参数名传过去（它根本没有这个参数）。
+    $txt = (& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:sensePath @CliArgs 2>$null | Out-String).Trim()
+    if (-not $txt) { return @() }
+    $obj = $txt | ConvertFrom-Json
+    if ($null -eq $obj) { return @() }
+    return @($obj.senses)
+  } catch {
+    Write-Log "调用 senses.ps1 失败：$($_.Exception.Message)"
+    return @()
   }
-} catch {
-  Write-Log "感官开关加载失败：$($_.Exception.Message)"
+}
+
+function Set-SenseButton($row) {
+  $b = $script:senseButtons[$row.key]
+  if ($null -eq $b) { return }
+  $b.Content = $script:senseShort[$row.key] + ' ' + $(if ($row.enabled) { '开' } else { '关' })
+  $conv = New-Object System.Windows.Media.BrushConverter
+  if ($row.enabled) {
+    $b.Background = $conv.ConvertFromString('#FFE3F6E6')
+    $b.Foreground = $conv.ConvertFromString('#FF1B5E20')
+  } else {
+    $b.Background = $conv.ConvertFromString('#FFF1F1F3')
+    $b.Foreground = $conv.ConvertFromString('#FF9A9A9A')
+  }
 }
 
 function Update-SenseButtons {
@@ -356,31 +376,21 @@ function Update-SenseButtons {
     }
     return
   }
-  try {
-    foreach ($row in (Get-SenseStatus)) {
-      $b = $script:senseButtons[$row.key]
-      if ($null -eq $b) { continue }
-      $b.Content = $script:senseShort[$row.key] + ' ' + $(if ($row.enabled) { '开' } else { '关' })
-      $conv = New-Object System.Windows.Media.BrushConverter
-      if ($row.enabled) {
-        $b.Background = $conv.ConvertFromString('#FFE3F6E6')
-        $b.Foreground = $conv.ConvertFromString('#FF1B5E20')
-      } else {
-        $b.Background = $conv.ConvertFromString('#FFF1F1F3')
-        $b.Foreground = $conv.ConvertFromString('#FF9A9A9A')
-      }
-    }
-  } catch {
-    Write-Log "刷新感官按钮失败：$($_.Exception.Message)"
-  }
+  $rows = Invoke-SensesCli -CliArgs @('-Action', 'status', '-Json')
+  if ($rows.Count -eq 0) { return }        # 拿不到就保持原样，别把按钮刷成空白
+  try { foreach ($row in $rows) { Set-SenseButton $row } }
+  catch { Write-Log "刷新感官按钮失败：$($_.Exception.Message)" }
 }
 
 function Switch-Sense($key) {
   if (-not $script:sensesOk) { return }
   try {
-    $on = Invoke-SenseToggle $key
-    Update-SenseButtons
-    $word = if ($on) { '打开' } else { '关掉' }
+    # 一次子进程就够：toggle 之后它会回传三只的最新状态，按钮和气泡都用这份
+    $rows = Invoke-SensesCli -CliArgs @('-Action', 'toggle', '-Target', $key, '-Json')
+    if ($rows.Count -eq 0) { Write-Log "切换感官失败（$key）：没拿到状态"; return }
+    foreach ($row in $rows) { Set-SenseButton $row }
+    $mine = $rows | Where-Object { $_.key -eq $key } | Select-Object -First 1
+    $word = if ($mine -and $mine.enabled) { '打开' } else { '关掉' }
     Add-Line 'me' ('（' + $script:senseFull[$key] + '已' + $word + '）')
     Write-Log ('感官开关：' + $script:senseFull[$key] + ' → ' + $word)
   } catch {
@@ -391,7 +401,12 @@ function Switch-Sense($key) {
 $btnEar.Add_Click({   Switch-Sense 'ear' })
 $btnWatch.Add_Click({ Switch-Sense 'watchman' })
 $btnEye.Add_Click({   Switch-Sense 'eye' })
-Update-SenseButtons          # 起来先把三个按钮刷成当前真实状态
+
+# 按钮状态**延迟**刷（别在 ShowDialog 之前阻塞 —— 那会让窗口晚出现将近 1 秒）
+$senseTimer = New-Object System.Windows.Threading.DispatcherTimer
+$senseTimer.Interval = [TimeSpan]::FromMilliseconds(800)
+$senseTimer.Add_Tick({ $senseTimer.Stop(); Update-SenseButtons })
+$window.Add_Loaded({ $senseTimer.Start() })
 
 function Save-Position {
   try {
